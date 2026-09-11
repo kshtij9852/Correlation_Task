@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Structure Correlation Desk</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style> html, body { margin: 0; padding: 0; } #root { min-height: 100vh; } </style>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/prop-types@15/prop-types.min.js"></script>
+<script crossorigin src="https://unpkg.com/recharts@2/umd/Recharts.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+</head>
+<body>
+<div id="root"><div style="color:#8A8F9C;font-family:sans-serif;padding:24px;background:#12151A;">Loading dashboard…</div></div>
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useCallback, useContext, createContext } = React;
+const {
+  ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip, Legend, ScatterChart, Scatter, ReferenceLine, ReferenceArea, ZAxis, Brush
+} = Recharts;
+
+
+/* ============================================================
+   CONSTANTS
+   ============================================================ */
+
+const V2_BASE = "https://qh-api.corp.hertshtengroup.com/api/v2/ohlc/";
+
+const MONTH_LETTERS = ["F","G","H","J","K","M","N","Q","U","V","X","Z"];
+const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+const STRUCTURE_TYPES = {
+  outright: { label: "Outright",   offsets: [0],       weights: [1] },
+  spread:   { label: "Spread",     offsets: [0, 1],    weights: [1, -1] },
+  fly:      { label: "Butterfly",  offsets: [0, 1, 2], weights: [1, -2, 1] },
+  dfly:     { label: "Double Fly", offsets: [0, 1, 2, 3], weights: [1, -3, 3, -1] }, // realized as Fly(N) - Fly(N+1)
+  custom:   { label: "Custom",     offsets: null,      weights: null },
+};
+
+const PRODUCTS = ["CO", "CL", "G"];
+const FIELD_OPTIONS = [
+  { value: "close", label: "Close" },
+  { value: "volume", label: "Volume" },
+];
+const isDerived = (type) => type === "dfly" || type === "custom";
+
+/* ============================================================
+   THEME
+   ============================================================ */
+
+const PALETTES = {
+  dark: {
+    mode: "dark",
+    bg: "#12151A", panel: "#181C24", panelAlt: "#1E2330",
+    border: "#2A2F3C", borderLight: "#363C4B",
+    text: "#E7E4DA", textDim: "#8A8F9C", textFaint: "#5C6270",
+    seriesA: "#4FA97C", seriesB: "#C4634A", amber: "#E0A458", danger: "#D9695A",
+    onAmber: "#1A140A",
+    instancePalette: ["#4FA97C","#5FA8D3","#C4634A","#E0A458","#9B7FD4","#6FBF73","#D3A5C7","#7C9CBF","#C9925C","#8FBF6F","#B06CA8","#5FBFB0"],
+  },
+  light: {
+    mode: "light",
+    bg: "#F4F2EC", panel: "#FFFFFF", panelAlt: "#EFEDE4",
+    border: "#D9D4C6", borderLight: "#C7C1AF",
+    text: "#20242B", textDim: "#565A62", textFaint: "#83868D",
+    seriesA: "#2E8557", seriesB: "#AE4A31", amber: "#A5701A", danger: "#B7402F",
+    onAmber: "#FFFBF3",
+    instancePalette: ["#2E8557","#2E6FA0","#AE4A31","#A5701A","#7C57AE","#3F8F45","#A15B92","#3E6E93","#95601E","#4F8A33","#8E4A82","#2E8E82"],
+  },
+};
+const ThemeCtx = createContext(PALETTES.dark);
+const useColors = () => useContext(ThemeCtx);
+const TokenCtx = createContext("");
+
+const inputBaseS = (C) => ({ background: C.panelAlt, border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, fontFamily: "var(--mono)", fontSize: 13, padding: "6px 8px", outline: "none" });
+const ghostBtnSmallS = (C) => ({ background: "transparent", border: `1px solid ${C.border}`, color: C.textDim, borderRadius: 4, padding: "2px 8px", fontSize: 12, cursor: "pointer" });
+const primaryBtnS = (C) => ({ background: C.amber, color: C.onAmber, border: "none", borderRadius: 4, padding: "8px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "var(--sans)" });
+const errorBoxS = (C) => ({ background: C.mode === "dark" ? "rgba(217,105,90,0.12)" : "rgba(183,64,47,0.08)", border: `1px solid ${C.danger}`, color: C.mode === "dark" ? "#F0A99B" : "#8A2E1E", borderRadius: 6, padding: "10px 14px", fontSize: 12, fontFamily: "var(--mono)" });
+const tooltipStyleS = (C) => ({ background: C.panelAlt, border: `1px solid ${C.border}`, borderRadius: 4, fontSize: 11, color: C.text });
+
+/* ============================================================
+   BUSINESS-DAY / EXPIRY / MONTH ARITHMETIC
+   ============================================================ */
+
+function isWeekend(date) { const d = date.getUTCDay(); return d === 0 || d === 6; }
+function lastBusinessDayOfMonth(year, monthIdx0) { let d = new Date(Date.UTC(year, monthIdx0 + 1, 0)); while (isWeekend(d)) d.setUTCDate(d.getUTCDate() - 1); return d; }
+function subtractBusinessDays(date, n) { let d = new Date(date.getTime()), count = 0; while (count < n) { d.setUTCDate(d.getUTCDate() - 1); if (!isWeekend(d)) count++; } return d; }
+function nthCalendarDay(year, monthIdx0, day) { return new Date(Date.UTC(year, monthIdx0, day)); }
+function computeExpiry(product, year, monthIdx0) {
+  if (product === "CO") { let m = monthIdx0 - 2, y = year; if (m < 0) { m += 12; y -= 1; } return lastBusinessDayOfMonth(y, m); }
+  if (product === "CL") {
+    let m = monthIdx0 - 1, y = year; if (m < 0) { m += 12; y -= 1; }
+    const d25 = nthCalendarDay(y, m, 25);
+    return isWeekend(d25) ? subtractBusinessDays(d25, 4) : subtractBusinessDays(d25, 3);
+  }
+  let m = monthIdx0 - 2, y = year; if (m < 0) { m += 12; y -= 1; } return lastBusinessDayOfMonth(y, m);
+}
+function addMonths(year, monthIdx0, n) { const total = year * 12 + monthIdx0 + n; return { year: Math.floor(total / 12), monthIdx0: ((total % 12) + 12) % 12 }; }
+function ordinal(n) { const s = ["th", "st", "nd", "rd"], v = n % 100; return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`; }
+function qhcodeOf(product, year, monthIdx0) { return `${product}${MONTH_LETTERS[monthIdx0]}${String(year).slice(-2)}`; }
+function monthYY(year, monthIdx0) { return `${MONTH_LETTERS[monthIdx0]}${String(year).slice(-2)}`; }
+function runningCode(product, months) { return months.map((m, i) => (i === 0 ? qhcodeOf(product, m.year, m.monthIdx0) : monthYY(m.year, m.monthIdx0))).join("-"); }
+function fmtDate(d) { return d.toISOString().slice(0, 10); }
+function dateStrToUnixSec(s) { return Math.floor(Date.parse(s + "T00:00:00Z") / 1000); }
+
+// Locally resolves "the Nth generic front month of `product` as of `asOfDate`" —
+// the v2 API has no generic-month concept, so we do the roll ourselves.
+function resolveFrontMonth(product, n, asOfDate) {
+  let year = asOfDate.getUTCFullYear(), monthIdx0 = asOfDate.getUTCMonth(), count = 0;
+  for (let i = 0; i < 300; i++) {
+    if (computeExpiry(product, year, monthIdx0).getTime() >= asOfDate.getTime()) {
+      count++;
+      if (count === n) return { year, monthIdx0 };
+    }
+    const nxt = addMonths(year, monthIdx0, 1);
+    year = nxt.year; monthIdx0 = nxt.monthIdx0;
+  }
+  return { year, monthIdx0 };
+}
+
+/* ============================================================
+   STRUCTURE → RUNNING CODE(S)
+   Outright/Spread/Butterfly resolve to ONE real running code
+   (API returns the actual traded structure price/volume directly).
+   Double Fly has no exchange convention, so it's built as
+   Fly(N) - Fly(N+1), two real flies, client-side subtracted.
+   Custom has no convention either — legs are individual outrights,
+   combined client-side with user weights.
+   ============================================================ */
+
+function buildStructureRequest(product, type, baseMonth, customOffsets, customWeights) {
+  if (type === "custom") {
+    const codes = customOffsets.map((off) => { const m = addMonths(baseMonth.year, baseMonth.monthIdx0, off); return qhcodeOf(product, m.year, m.monthIdx0); });
+    return { codes, weights: customWeights, derived: true };
+  }
+  if (type === "dfly") {
+    const legA = [0, 1, 2].map((off) => addMonths(baseMonth.year, baseMonth.monthIdx0, off));
+    const legB = [1, 2, 3].map((off) => addMonths(baseMonth.year, baseMonth.monthIdx0, off));
+    return { codes: [runningCode(product, legA), runningCode(product, legB)], weights: [1, -1], derived: true };
+  }
+  const t = STRUCTURE_TYPES[type];
+  const months = t.offsets.map((off) => addMonths(baseMonth.year, baseMonth.monthIdx0, off));
+  return { codes: [runningCode(product, months)], weights: [1], derived: false };
+}
+
+/* ============================================================
+   API LAYER (v2 OHLC, running codes)
+   ============================================================ */
+
+function chunkArr(arr, size) { const out = []; for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size)); return out; }
+
+async function fetchOhlcRaw(token, instruments, { startSec, endSec, count, interval = "1D" }) {
+  const url = new URL(V2_BASE);
+  url.searchParams.set("instruments", instruments.join(","));
+  url.searchParams.set("interval", interval);
+  if (startSec !== undefined && startSec !== null) url.searchParams.set("start", String(startSec));
+  if (endSec !== undefined && endSec !== null) url.searchParams.set("end", String(endSec));
+  if (count !== undefined && count !== null) url.searchParams.set("count", String(count));
+
+  let res;
+  try {
+    res = await fetch(url.toString(), {
+      headers: { Authorization: token, Accept: "application/json" }
+    });
+  } catch (e) {
+    throw new Error(`Network request failed for ${instruments.slice(0, 2).join(",")}${instruments.length > 2 ? "…" : ""}. Usually CORS, VPN, or an unreachable host.`);
+  }
+
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`Auth rejected (${res.status}). Check the token is fresh and formatted as "Bearer <token>".`);
+    }
+    let detail = "";
+    try {
+      const body = await res.text();
+      if (body) detail = ` — ${body.slice(0, 500)}`;
+    } catch (_) {}
+    throw new Error(`API error ${res.status} for ${instruments.slice(0, 2).join(",")}${detail}`);
+  }
+
+  const json = await res.json();
+
+  // The supplied v2 OHLC API response is a RAW JSON ARRAY, e.g.
+  // [ { product: "COX26-Z26", time: ..., close: 3.92, ... } ]
+  // The old code only read json.data, turning a valid 200 response into [].
+  // Accept both the raw array and a wrapped {data:[...]} response.
+  if (Array.isArray(json)) return json;
+  if (json && json.status && json.status !== "SUCCESS") {
+    throw new Error(`API returned status ${json.status}`);
+  }
+  if (json && Array.isArray(json.data)) return json.data;
+
+  throw new Error("API returned 200 but no OHLC array was found in the response.");
+}
+
+// Batches up to 50 instruments per call, groups results by the echoed `product` code.
+async function fetchOhlcBatch(token, instruments, opts) {
+  const unique = [...new Set(instruments)];
+  const groups = chunkArr(unique, 50);
+  const results = [];
+  const failedCodes = [];
+  for (const g of groups) {
+    try {
+      results.push(await fetchOhlcRaw(token, g, opts));
+      continue;
+    } catch (e) {
+      // A bad/unfamiliar token means every code will fail the same way —
+      // stop immediately rather than burning requests on a per-code retry.
+      if (/^Auth rejected/.test(e.message)) throw e;
+
+      // Otherwise: some deployments reject an entire comma-separated batch
+      // over something specific to ONE instrument in it (seen with far-
+      // forward / newly-listed contract months), even though every code
+      // fetches fine on its own. Don't let that one code wipe out every
+      // other code's data — retry one instrument at a time and keep
+      // whatever succeeds, instead of aborting the whole batch.
+      const singles = await Promise.allSettled(g.map((code) => fetchOhlcRaw(token, [code], opts)));
+      singles.forEach((s, i) => {
+        if (s.status === "fulfilled") results.push(s.value);
+        else failedCodes.push({ code: g[i], error: (s.reason && s.reason.message) || String(s.reason) });
+      });
+    }
+  }
+  const rows = results.flat();
+  const byCode = new Map();
+  rows.forEach((r) => {
+    const code = r.product;
+    if (!code || r.time === undefined || r.time === null) return;
+
+    // The supplied API response uses milliseconds (e.g. 1783739200000),
+    // although the request documentation describes Unix seconds.
+    // Accept either representation.
+    const rawTime = Number(r.time);
+    const timeMs = Math.abs(rawTime) < 100000000000 ? rawTime * 1000 : rawTime;
+    const date = new Date(timeMs);
+    if (Number.isNaN(date.getTime())) return;
+
+    if (!byCode.has(code)) byCode.set(code, []);
+    byCode.get(code).push({
+      date: date.toISOString().slice(0, 10),
+      close: r.close,
+      volume: r.volume
+    });
+  });
+  byCode.forEach((rows2) => rows2.sort((a, b) => a.date.localeCompare(b.date)));
+  // Surfaced (not thrown) so callers can show a soft warning instead of losing every other code's data.
+  byCode.__failedCodes = failedCodes;
+  return byCode;
+}
+
+/* ---- forward-fill combine (only used for derived structures) ---- */
+function unionSortedDates(rowsArr) { const set = new Set(); rowsArr.forEach((rows) => rows.forEach((r) => set.add(r.date))); return [...set].sort(); }
+function combineWithForwardFill(rowsArr, weights, field) {
+  const maps = rowsArr.map((rows) => { const m = new Map(); rows.forEach((r) => { if (r[field] !== null && r[field] !== undefined) m.set(r.date, r[field]); }); return m; });
+  const dates = unionSortedDates(rowsArr);
+  const last = maps.map(() => undefined);
+  const out = [];
+  for (const dt of dates) {
+    let stale = false, missing = false, val = 0;
+    for (let i = 0; i < maps.length; i++) {
+      if (maps[i].has(dt)) last[i] = maps[i].get(dt);
+      else if (last[i] !== undefined) stale = true;
+      else missing = true;
+      if (last[i] !== undefined) val += weights[i] * last[i];
+    }
+    if (missing) continue; // can't compute until every leg has printed at least once
+    out.push({ date: dt, value: val, stale });
+  }
+  return out;
+}
+
+async function fetchStructureSeries(token, leg, baseMonth, startSec, endSec, field) {
+  const req = buildStructureRequest(leg.product, leg.type, baseMonth, leg.customOffsets, leg.customWeights);
+  const effField = req.derived && field === "volume" ? "close" : field;
+  // Use the documented start/end range. Do not add a large `count` value:
+  // some API deployments reject that combination with HTTP 400.
+  const byCode = await fetchOhlcBatch(token, req.codes, { startSec, endSec });
+  const rowsArr = req.codes.map((c) => byCode.get(c) || []);
+  if (req.codes.length === 1) return rowsArr[0].map((r) => ({ date: r.date, value: r[effField], stale: false }));
+  return combineWithForwardFill(rowsArr, req.weights, effField);
+}
+function combineIntermarket(seriesA, seriesB) {
+  const mapB = new Map(seriesB.map((r) => [r.date, r]));
+  return seriesA.filter((r) => mapB.has(r.date)).map((r) => ({ date: r.date, value: r.value - mapB.get(r.date).value, stale: r.stale || mapB.get(r.date).stale }));
+}
+
+/* ============================================================
+   STATS
+   ============================================================ */
+
+function pearson(xs, ys) { const n = xs.length; if (n < 2) return null; const mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n; let num = 0, dx2 = 0, dy2 = 0; for (let i = 0; i < n; i++) { const dx = xs[i] - mx, dy = ys[i] - my; num += dx * dy; dx2 += dx * dx; dy2 += dy * dy; } const den = Math.sqrt(dx2 * dy2); return den === 0 ? null : num / den; }
+function linreg(xs, ys) { const n = xs.length; const mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n; let num = 0, den = 0; for (let i = 0; i < n; i++) { num += (xs[i] - mx) * (ys[i] - my); den += (xs[i] - mx) ** 2; } const slope = den === 0 ? 0 : num / den; return { slope, intercept: my - slope * mx }; }
+function diffs(arr) { const out = []; for (let i = 1; i < arr.length; i++) out.push(arr[i] - arr[i - 1]); return out; }
+function rollingCorr(xs, ys, dates, window) { const out = []; for (let i = window; i <= xs.length; i++) out.push({ date: dates[i - 1], corr: pearson(xs.slice(i - window, i), ys.slice(i - window, i)) }); return out; }
+function alignSeriesFull(a, b) { const mb = new Map(b.map((r) => [r.date, r])); return a.filter((r) => mb.has(r.date)).map((r) => ({ date: r.date, xVal: r.value, xStale: r.stale, yVal: mb.get(r.date).value, yStale: mb.get(r.date).stale })); }
+function zscore(arr) { const n = arr.length; const m = arr.reduce((a, b) => a + b, 0) / n; const sd = Math.sqrt(arr.reduce((a, b) => a + (b - m) ** 2, 0) / n) || 1; return arr.map((v) => (v - m) / sd); }
+
+/* ============================================================
+   SMALL UI ATOMS
+   ============================================================ */
+
+function Field({ label, children, width }) { const C = useColors(); return (<div style={{ display: "flex", flexDirection: "column", gap: 4, width }}><span style={{ fontSize: 11, color: C.textDim, letterSpacing: 0.2 }}>{label}</span>{children}</div>); }
+function Select({ value, onChange, options, width }) { const C = useColors(); return (<select value={value} onChange={(e) => onChange(e.target.value)} style={{ ...inputBaseS(C), width, cursor: "pointer" }}>{options.map((o) => <option key={o.value} value={o.value} disabled={o.disabled}>{o.label}</option>)}</select>); }
+function NumberInput({ value, onChange, width, min, step }) { const C = useColors(); return (<input type="number" value={value} min={min} step={step || 1} onChange={(e) => onChange(Number(e.target.value))} style={{ ...inputBaseS(C), width }} />); }
+function DateInput({ value, onChange, width }) { const C = useColors(); return (<input type="date" value={value} onChange={(e) => onChange(e.target.value)} style={{ ...inputBaseS(C), width, colorScheme: C.mode }} />); }
+
+/* ---- zoom: drag-select a rectangle on the chart itself, or drag the brush strip ---- */
+function useZoom(defaultDataKey) {
+  const [domain, setDomain] = useState(["dataMin", "dataMax"]);
+  const [ref, setRef] = useState({ left: "", right: "" });
+  const [brushKey, setBrushKey] = useState(0);
+  const onMouseDown = (e) => { if (e && e.activeLabel !== undefined) setRef({ left: e.activeLabel, right: e.activeLabel }); };
+  const onMouseMove = (e) => { if (e && ref.left !== "" && e.activeLabel !== undefined) setRef((r) => ({ ...r, right: e.activeLabel })); };
+  const onMouseUp = () => {
+    if (ref.left === "" || ref.right === "" || ref.left === ref.right) { setRef({ left: "", right: "" }); return; }
+    let l = ref.left, r = ref.right;
+    if (l > r) { const t = l; l = r; r = t; }
+    setDomain([l, r]);
+    setRef({ left: "", right: "" });
+  };
+  const reset = () => { setDomain(["dataMin", "dataMax"]); setRef({ left: "", right: "" }); setBrushKey((k) => k + 1); };
+  return { domain, ref, onMouseDown, onMouseMove, onMouseUp, reset, brushKey };
+}
+function ZoomBar({ onReset }) {
+  const C = useColors();
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 2 }}>
+      <span style={{ fontSize: 10, color: C.textFaint }}>Drag on the chart to zoom into an area, or drag the strip below</span>
+      <button onClick={onReset} style={{ ...ghostBtnSmallS(C), fontSize: 10 }}>Reset zoom</button>
+    </div>
+  );
+}
+function staleDot(dataKey, warnColor) {
+  return (props) => {
+    const { cx, cy, payload } = props;
+    if (payload && payload[`${dataKey}__stale`]) return <circle cx={cx} cy={cy} r={3} fill={warnColor} stroke={warnColor} />;
+    return null;
+  };
+}
+
+/* ============================================================
+   STRUCTURE BUILDER
+   ============================================================ */
+
+function defaultLeg(product = "CO") { return { product, type: "outright", startMonth: 1, customOffsets: [0, 1], customWeights: [1, -1] }; }
+function defaultStructureConfig(product) { return { mode: "single", a: defaultLeg(product), b: defaultLeg(product === "CO" ? "CL" : "CO") }; }
+
+function LegEditor({ leg, onChange, accent, label, showStartMonth = true, anchorPreview }) {
+  const C = useColors();
+  const t = STRUCTURE_TYPES[leg.type];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+        <Field label={label || "Product"} width={72}><Select value={leg.product} onChange={(v) => onChange({ ...leg, product: v })} options={PRODUCTS.map((p) => ({ value: p, label: p }))} /></Field>
+        <Field label="Structure" width={130}><Select value={leg.type} onChange={(v) => onChange({ ...leg, type: v })} options={Object.entries(STRUCTURE_TYPES).map(([k, v]) => ({ value: k, label: v.label }))} /></Field>
+        {leg.type !== "custom" && showStartMonth && (
+          <Field label={`Start month (${leg.product}${leg.startMonth})`} width={90}><NumberInput value={leg.startMonth} min={1} onChange={(v) => onChange({ ...leg, startMonth: Math.max(1, v) })} /></Field>
+        )}
+      </div>
+      {leg.type === "custom" && (
+        <CustomWeightEditor product={leg.product} offsets={leg.customOffsets} weights={leg.customWeights} onChange={(offsets, weights) => onChange({ ...leg, customOffsets: offsets, customWeights: weights })} />
+      )}
+      {leg.type !== "custom" && (
+        <div style={{ fontSize: 11, color: accent, fontFamily: "var(--mono)" }}>
+          {showStartMonth
+            ? t.offsets.map((o, i) => `${t.weights[i] > 0 ? "+" : ""}${t.weights[i]}\u00b7${leg.product}${leg.startMonth + o}`).join("  ")
+            : t.offsets.map((o, i) => `${t.weights[i] > 0 ? "+" : ""}${t.weights[i]}\u00b7${leg.product}[anchor${o > 0 ? `+${o}` : ""}]`).join("  ")}
+          {leg.type === "dfly" && <span style={{ color: C.textFaint }}> {"  "}(built as Fly(N) \u2212 Fly(N+1), two real flies subtracted)</span>}
+        </div>
+      )}
+      {isDerived(leg.type) && <div style={{ fontSize: 10, color: C.textFaint }}>Derived structure \u2014 Volume isn't meaningful here (forced to Close).</div>}
+      {!showStartMonth && <div style={{ fontSize: 10, color: C.textFaint }}>Front leg is set by "Anchor contract month" below{anchorPreview ? ` (${anchorPreview})` : ""}.</div>}
+    </div>
+  );
+}
+function CustomWeightEditor({ product, offsets, weights, onChange }) {
+  const C = useColors();
+  const update = (i, key, val) => { const o = [...offsets], w = [...weights]; if (key === "offset") o[i] = val; else w[i] = val; onChange(o, w); };
+  const addLeg = () => onChange([...offsets, offsets.length], [...weights, 0]);
+  const removeLeg = (i) => onChange(offsets.filter((_, j) => j !== i), weights.filter((_, j) => j !== i));
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 4, padding: 8 }}>
+      {offsets.map((off, i) => (
+        <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: C.textFaint, width: 30 }}>{product}{off + 1}</span>
+          <NumberInput value={off} min={0} onChange={(v) => update(i, "offset", v)} width={50} />
+          <span style={{ fontSize: 11, color: C.textFaint }}>weight</span>
+          <NumberInput value={weights[i]} onChange={(v) => update(i, "weight", v)} width={60} step={0.5} />
+          <button onClick={() => removeLeg(i)} style={ghostBtnSmallS(C)}>\u00d7</button>
+        </div>
+      ))}
+      <button onClick={addLeg} style={{ ...ghostBtnSmallS(C), alignSelf: "flex-start" }}>+ leg</button>
+    </div>
+  );
+}
+function StructureBuilderPanel({ config, onChange, accent, title, showStartMonth = true, anchorPreview }) {
+  const C = useColors();
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 6, padding: 14, flex: 1, minWidth: 300 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <span style={{ fontFamily: "var(--sans)", fontSize: 13, color: accent, fontWeight: 600 }}>{title}</span>
+        <div style={{ display: "flex", gap: 4, background: C.bg, borderRadius: 4, padding: 2 }}>
+          {["single", "intermarket"].map((m) => (
+            <button key={m} onClick={() => onChange({ ...config, mode: m })} style={{ background: config.mode === m ? C.panelAlt : "transparent", color: config.mode === m ? C.text : C.textFaint, border: "none", borderRadius: 3, padding: "4px 10px", fontSize: 11, cursor: "pointer", fontFamily: "var(--mono)" }}>{m === "single" ? "Single" : "Intermarket"}</button>
+          ))}
+        </div>
+      </div>
+      <LegEditor leg={config.a} onChange={(a) => onChange({ ...config, a })} accent={accent} label={config.mode === "intermarket" ? "Product A" : "Product"} showStartMonth={showStartMonth} anchorPreview={anchorPreview} />
+      {config.mode === "intermarket" && (<>
+        <div style={{ fontSize: 11, color: C.textFaint, margin: "10px 0 6px", fontFamily: "var(--mono)" }}>\u2212 minus \u2212</div>
+        <LegEditor leg={config.b} onChange={(b) => onChange({ ...config, b })} accent={accent} label="Product B" showStartMonth={showStartMonth} anchorPreview={anchorPreview} />
+      </>)}
+    </div>
+  );
+}
+
+/* ============================================================
+   TAB 1 — CORRELATION EXPLORER
+   ============================================================ */
+
+function CorrelationExplorer() {
+  const C = useColors();
+  const token = useContext(TokenCtx);
+  const [cfgA, setCfgA] = useState(defaultStructureConfig("CO"));
+  const [cfgB, setCfgB] = useState({ ...defaultStructureConfig("CO"), a: { ...defaultLeg("CO"), type: "fly", startMonth: 4 } });
+  const [field, setField] = useState("close");
+  const today = new Date();
+  const [dateStart, setDateStart] = useState(fmtDate(new Date(Date.UTC(today.getFullYear() - 1, today.getMonth(), today.getDate()))));
+  const [dateEnd, setDateEnd] = useState(fmtDate(today));
+  const [rollWindow, setRollWindow] = useState(20);
+  const [normalize, setNormalize] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [data, setData] = useState(null);
+
+  const volumeDisabled = [cfgA.a, cfgB.a, ...(cfgA.mode === "intermarket" ? [cfgA.b] : []), ...(cfgB.mode === "intermarket" ? [cfgB.b] : [])].some((l) => isDerived(l.type));
+  const effectiveField = volumeDisabled && field === "volume" ? "close" : field;
+
+  const zoomOverlay = useZoom();
+  const zoomRoll = useZoom();
+  const [scatterX, setScatterX] = useState({ min: "", max: "" });
+  const [scatterY, setScatterY] = useState({ min: "", max: "" });
+
+  const run = useCallback(async () => {
+    if (!token) { setError("Paste your API token in the header first."); return; }
+    setLoading(true); setError(null);
+    try {
+      const startSec = dateStrToUnixSec(dateStart), endSec = dateStrToUnixSec(dateEnd);
+      const resolve = async (cfg) => {
+        const baseA = resolveFrontMonth(cfg.a.product, cfg.a.startMonth, new Date());
+        const sA = await fetchStructureSeries(token, cfg.a, baseA, startSec, endSec, effectiveField);
+        if (cfg.mode === "single") return sA;
+        const baseB = resolveFrontMonth(cfg.b.product, cfg.b.startMonth, new Date());
+        const sB = await fetchStructureSeries(token, cfg.b, baseB, startSec, endSec, effectiveField);
+        return combineIntermarket(sA, sB);
+      };
+      const [seriesA, seriesB] = await Promise.all([resolve(cfgA), resolve(cfgB)]);
+      if (seriesA.length === 0 || seriesB.length === 0) { setError("No overlapping data returned for one or both series — check the structure and date range."); setData(null); }
+      else {
+        setData({ seriesA, seriesB });
+        zoomOverlay.reset(); zoomRoll.reset();
+        setScatterX({ min: "", max: "" }); setScatterY({ min: "", max: "" });
+      }
+    } catch (e) { setError(e.message); setData(null); }
+    finally { setLoading(false); }
+    // eslint-disable-next-line
+  }, [token, cfgA, cfgB, dateStart, dateEnd, effectiveField]);
+
+  const analysis = useMemo(() => {
+    if (!data) return null;
+    const rows = alignSeriesFull(data.seriesA, data.seriesB);
+    if (rows.length < 3) return null;
+    const xs = rows.map((r) => r.xVal), ys = rows.map((r) => r.yVal), dates = rows.map((r) => r.date);
+    const dxs = diffs(xs), dys = diffs(ys);
+    const levelCorr = pearson(xs, ys), returnCorr = pearson(dxs, dys);
+    const { slope } = linreg(xs, ys);
+    const roll = rollWindow < dates.length ? rollingCorr(xs, ys, dates, rollWindow) : [];
+    const zx = normalize ? zscore(xs) : xs, zy = normalize ? zscore(ys) : ys;
+    const chartData = rows.map((r, i) => ({ date: r.date, A: zx[i], B: zy[i], A__stale: r.xStale, B__stale: r.yStale }));
+    const scatterData = dxs.map((d, i) => ({ x: d, y: dys[i] }));
+    return { levelCorr, returnCorr, slope, roll, chartData, scatterData, n: dates.length, anyStale: rows.some((r) => r.xStale || r.yStale) };
+  }, [data, rollWindow, normalize]);
+
+  const scatterDomainX = scatterX.min !== "" && scatterX.max !== "" ? [Number(scatterX.min), Number(scatterX.max)] : ["auto", "auto"];
+  const scatterDomainY = scatterY.min !== "" && scatterY.max !== "" ? [Number(scatterY.min), Number(scatterY.max)] : ["auto", "auto"];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <StructureBuilderPanel config={cfgA} onChange={setCfgA} accent={C.seriesA} title="Series A" />
+        <StructureBuilderPanel config={cfgB} onChange={setCfgB} accent={C.seriesB} title="Series B" />
+      </div>
+
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 6, padding: 14 }}>
+        <Field label="Field" width={130}><Select value={effectiveField} onChange={setField} options={FIELD_OPTIONS.map((o) => ({ ...o, disabled: o.value === "volume" && volumeDisabled }))} /></Field>
+        <Field label="Start" width={140}><DateInput value={dateStart} onChange={setDateStart} /></Field>
+        <Field label="End" width={140}><DateInput value={dateEnd} onChange={setDateEnd} /></Field>
+        <Field label="Rolling window (days)" width={90}><NumberInput value={rollWindow} min={5} onChange={setRollWindow} /></Field>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: C.textDim, cursor: "pointer" }}><input type="checkbox" checked={normalize} onChange={(e) => setNormalize(e.target.checked)} />Z-score normalize overlay</label>
+        <button onClick={run} disabled={loading} style={primaryBtnS(C)}>{loading ? "Fetching\u2026" : "Analyze"}</button>
+      </div>
+      {volumeDisabled && field === "volume" && <div style={{ fontSize: 11, color: C.textFaint }}>Volume disabled and reverted to Close — a Double Fly / Custom leg is selected, and combining volume across those legs isn't a meaningful number.</div>}
+
+      {error && <div style={errorBoxS(C)}>{error}</div>}
+
+      {analysis && (<>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <StatCard label="Level correlation" value={analysis.levelCorr} n={analysis.n} help="Pearson correlation of the two series' raw values, day by day. High means they tend to sit at similar relative levels over the window — but this can be inflated if both series simply trend in the same direction." />
+          <StatCard label="Daily-change correlation" value={analysis.returnCorr} n={analysis.n - 1} help="Pearson correlation of day-over-day changes (not levels). This is usually the more honest read of co-movement, since it isn't fooled by two series that both drift the same way without actually moving together day to day." />
+          <StatCard label="Beta (A on B)" value={analysis.slope} raw help="Slope of the least-squares line fitting A's level to B's level: on average, how many units A moves per 1-unit move in B." />
+          <StatCard label="R\u00b2" value={analysis.levelCorr === null ? null : analysis.levelCorr ** 2} raw help="Level correlation squared — the share of A's level variance 'explained' by B's level, in a simple linear sense." />
+        </div>
+
+        <ChartPanel title={`${normalize ? "Normalized (z-score)" : "Level"} overlay`}>
+          <ZoomBar onReset={zoomOverlay.reset} />
+          <ResponsiveContainer width="100%" height={300}>
+            <LineChart data={analysis.chartData} margin={{ top: 6, right: 12, left: 0, bottom: 0 }} onMouseDown={zoomOverlay.onMouseDown} onMouseMove={zoomOverlay.onMouseMove} onMouseUp={zoomOverlay.onMouseUp}>
+              <CartesianGrid stroke={C.border} strokeDasharray="2 4" />
+              <XAxis dataKey="date" domain={zoomOverlay.domain} allowDataOverflow tick={{ fill: C.textFaint, fontSize: 10 }} minTickGap={40} stroke={C.border} />
+              <YAxis tick={{ fill: C.textFaint, fontSize: 10 }} stroke={C.border} />
+              <Tooltip contentStyle={tooltipStyleS(C)} labelStyle={{ color: C.textDim }} />
+              <Legend wrapperStyle={{ fontSize: 11, color: C.textDim }} />
+              <Line type="monotone" dataKey="A" stroke={C.seriesA} dot={staleDot("A", C.amber)} strokeWidth={1.6} name="Series A" isAnimationActive={false} />
+              <Line type="monotone" dataKey="B" stroke={C.seriesB} dot={staleDot("B", C.amber)} strokeWidth={1.6} name="Series B" isAnimationActive={false} />
+              {zoomOverlay.ref.left && zoomOverlay.ref.right ? <ReferenceArea x1={zoomOverlay.ref.left} x2={zoomOverlay.ref.right} strokeOpacity={0.3} fill={C.amber} fillOpacity={0.12} /> : null}
+              <Brush key={zoomOverlay.brushKey} dataKey="date" height={20} stroke={C.amber} fill={C.panelAlt} travellerWidth={8} tickFormatter={() => ""} />
+            </LineChart>
+          </ResponsiveContainer>
+          {analysis.anyStale && <div style={{ fontSize: 10, color: C.textFaint, marginTop: 4 }}>Hollow amber dots mark forward-filled points (Double Fly / Custom legs, no fresh print that day).</div>}
+        </ChartPanel>
+
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+          <ChartPanel title="Rolling correlation" style={{ flex: 1, minWidth: 320 }}>
+            <ZoomBar onReset={zoomRoll.reset} />
+            <ResponsiveContainer width="100%" height={230}>
+              <LineChart data={analysis.roll} margin={{ top: 6, right: 12, left: 0, bottom: 0 }} onMouseDown={zoomRoll.onMouseDown} onMouseMove={zoomRoll.onMouseMove} onMouseUp={zoomRoll.onMouseUp}>
+                <CartesianGrid stroke={C.border} strokeDasharray="2 4" />
+                <XAxis dataKey="date" domain={zoomRoll.domain} allowDataOverflow tick={{ fill: C.textFaint, fontSize: 10 }} minTickGap={40} stroke={C.border} />
+                <YAxis domain={[-1, 1]} tick={{ fill: C.textFaint, fontSize: 10 }} stroke={C.border} />
+                <Tooltip contentStyle={tooltipStyleS(C)} />
+                <ReferenceLine y={0} stroke={C.borderLight} />
+                <Line type="monotone" dataKey="corr" stroke={C.amber} dot={false} strokeWidth={1.6} isAnimationActive={false} />
+                {zoomRoll.ref.left && zoomRoll.ref.right ? <ReferenceArea x1={zoomRoll.ref.left} x2={zoomRoll.ref.right} strokeOpacity={0.3} fill={C.amber} fillOpacity={0.12} /> : null}
+                <Brush key={zoomRoll.brushKey} dataKey="date" height={18} stroke={C.amber} fill={C.panelAlt} travellerWidth={8} tickFormatter={() => ""} />
+              </LineChart>
+            </ResponsiveContainer>
+          </ChartPanel>
+
+          <ChartPanel title="Daily-change scatter (A vs B)" style={{ flex: 1, minWidth: 320 }}>
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+              <span style={{ fontSize: 10, color: C.textFaint }}>\u0394A range</span>
+              <NumberInput value={scatterX.min} onChange={(v) => setScatterX((s) => ({ ...s, min: v }))} width={60} />
+              <NumberInput value={scatterX.max} onChange={(v) => setScatterX((s) => ({ ...s, max: v }))} width={60} />
+              <span style={{ fontSize: 10, color: C.textFaint, marginLeft: 8 }}>\u0394B range</span>
+              <NumberInput value={scatterY.min} onChange={(v) => setScatterY((s) => ({ ...s, min: v }))} width={60} />
+              <NumberInput value={scatterY.max} onChange={(v) => setScatterY((s) => ({ ...s, max: v }))} width={60} />
+              <button onClick={() => { setScatterX({ min: "", max: "" }); setScatterY({ min: "", max: "" }); }} style={{ ...ghostBtnSmallS(C), fontSize: 10 }}>Reset</button>
+            </div>
+            <ResponsiveContainer width="100%" height={192}>
+              <ScatterChart margin={{ top: 6, right: 12, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke={C.border} strokeDasharray="2 4" />
+                <XAxis type="number" dataKey="x" name="\u0394 A" domain={scatterDomainX} tick={{ fill: C.textFaint, fontSize: 10 }} stroke={C.border} />
+                <YAxis type="number" dataKey="y" name="\u0394 B" domain={scatterDomainY} tick={{ fill: C.textFaint, fontSize: 10 }} stroke={C.border} />
+                <ZAxis range={[20, 20]} />
+                <Tooltip contentStyle={tooltipStyleS(C)} cursor={{ strokeDasharray: "2 4" }} />
+                <Scatter data={analysis.scatterData} fill={C.amber} fillOpacity={0.6} isAnimationActive={false} />
+              </ScatterChart>
+            </ResponsiveContainer>
+          </ChartPanel>
+        </div>
+      </>)}
+    </div>
+  );
+}
+
+/* ============================================================
+   TAB 2 — PRE-EXPIRY EXPLORER
+   ============================================================ */
+
+function PreExpiryExplorer() {
+  const C = useColors();
+  const token = useContext(TokenCtx);
+  const [cfg, setCfg] = useState(defaultStructureConfig("CO"));
+  const [field, setField] = useState("close");
+  const today = new Date();
+  const [anchorYear, setAnchorYear] = useState(today.getUTCFullYear());
+  const [anchorMonth, setAnchorMonth] = useState(today.getUTCMonth() + 1);
+  const [lookback, setLookback] = useState(6);
+  const [windowDays, setWindowDays] = useState(90);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [fetchWarning, setFetchWarning] = useState(null);
+  const [instances, setInstances] = useState(null);
+  const [hidden, setHidden] = useState(() => new Set());
+  const [rollMarks, setRollMarks] = useState(null);
+  const [showRollLines, setShowRollLines] = useState(true);
+  const zoomChart = useZoom();
+
+  const volumeDisabled = [cfg.a, ...(cfg.mode === "intermarket" ? [cfg.b] : [])].some((l) => isDerived(l.type));
+  const effectiveField = volumeDisabled && field === "volume" ? "close" : field;
+
+  const run = useCallback(async () => {
+    if (!token) { setError("Paste your API token in the header first."); return; }
+    setLoading(true); setError(null);
+    try {
+      // Precompute every instance's window + structure request first, then one big batched fetch.
+      const planned = [];
+      for (let k = 0; k < lookback; k++) {
+        const front = addMonths(anchorYear, anchorMonth - 1, -k);
+        const expiry = computeExpiry(cfg.a.product, front.year, front.monthIdx0);
+        const windowStart = fmtDate(new Date(expiry.getTime() - windowDays * 86400000));
+        const windowEnd = fmtDate(expiry);
+        const reqA = buildStructureRequest(cfg.a.product, cfg.a.type, front, cfg.a.customOffsets, cfg.a.customWeights);
+        const reqB = cfg.mode === "intermarket" ? buildStructureRequest(cfg.b.product, cfg.b.type, front, cfg.b.customOffsets, cfg.b.customWeights) : null;
+        // Roll schedule: the tracked contract's generic rank steps down by one
+        // exactly when each nearer month (front - j) expires. Express each of
+        // those calendar dates as dte relative to the tracked contract's OWN
+        // expiry so it can be plotted on the same shared "days to expiry" axis.
+        const rollPoints = [];
+        for (let j = 1; j <= 24; j++) {
+          const priorMonth = addMonths(front.year, front.monthIdx0, -j);
+          const priorExpiry = computeExpiry(cfg.a.product, priorMonth.year, priorMonth.monthIdx0);
+          const dte = Math.round((priorExpiry.getTime() - expiry.getTime()) / 86400000);
+          if (dte < -windowDays) break;
+          rollPoints.push({ j, dte, label: `${ordinal(j + 1)}\u2192${ordinal(j)}` });
+        }
+        planned.push({ k, front, expiry, windowStart, windowEnd, reqA, reqB, rollPoints, label: `${MONTH_NAMES[front.monthIdx0]}${String(front.year).slice(-2)}` });
+      }
+      const allCodes = planned.flatMap((p) => [...p.reqA.codes, ...(p.reqB ? p.reqB.codes : [])]);
+      const globalStartSec = Math.min(...planned.map((p) => dateStrToUnixSec(p.windowStart)));
+      const globalEndSec = Math.max(...planned.map((p) => dateStrToUnixSec(p.windowEnd))) + 86400;
+      // Use only the documented start/end range. Avoid a large explicit
+      // count because it can cause HTTP 400 on the multi-instrument request.
+      const byCode = await fetchOhlcBatch(token, allCodes, {
+        startSec: globalStartSec,
+        endSec: globalEndSec
+      });
+
+      const effField = (req) => (req.derived && effectiveField === "volume" ? "close" : effectiveField);
+      const seriesFor = (req) => {
+        const rowsArr = req.codes.map((c) => byCode.get(c) || []);
+        return rowsArr.length === 1 ? rowsArr[0].map((r) => ({ date: r.date, value: r[effField(req)], stale: false })) : combineWithForwardFill(rowsArr, req.weights, effField(req));
+      };
+
+      const results = [];
+      for (const p of planned) {
+        let series = seriesFor(p.reqA);
+        if (p.reqB) series = combineIntermarket(series, seriesFor(p.reqB));
+        series = series.filter((r) => r.date >= p.windowStart && r.date <= p.windowEnd);
+        if (series.length === 0) continue;
+        const withDte = series.map((r) => ({ ...r, dte: Math.round((Date.parse(r.date + "T00:00:00Z") - p.expiry.getTime()) / 86400000) }));
+        results.push({ label: p.label, expiry: fmtDate(p.expiry), series: withDte, rollPoints: p.rollPoints });
+      }
+      if (results.length === 0) { setError("No data returned for any instance — check the structure legs, product, and lookback window."); setInstances(null); setRollMarks(null); }
+      else {
+        setInstances(results); setHidden(new Set()); zoomChart.reset();
+        // Average each rank-transition's dte across every instance that has
+        // it, so the chart gets one clean generic marker per roll instead of
+        // one slightly-jittered line per historical instance.
+        const rollAgg = new Map();
+        results.forEach((r) => r.rollPoints.forEach((rp) => {
+          if (!rollAgg.has(rp.j)) rollAgg.set(rp.j, { sum: 0, n: 0, label: rp.label });
+          const e = rollAgg.get(rp.j); e.sum += rp.dte; e.n += 1;
+        }));
+        setRollMarks([...rollAgg.entries()].map(([j, e]) => ({ j, dte: Math.round(e.sum / e.n), label: e.label })).sort((a, b) => b.dte - a.dte));
+      }
+      const failed = byCode.__failedCodes;
+      setFetchWarning(failed && failed.length ? `Couldn't fetch ${failed.length} code${failed.length > 1 ? "s" : ""} even after retrying individually (other instances above are unaffected): ${failed.map((f) => f.code).join(", ")}` : null);
+    } catch (e) { setError(e.message); setInstances(null); setRollMarks(null); }
+    finally { setLoading(false); }
+    // eslint-disable-next-line
+  }, [token, cfg, anchorYear, anchorMonth, lookback, windowDays, effectiveField]);
+
+  const toggleHidden = (label) => setHidden((prev) => { const next = new Set(prev); next.has(label) ? next.delete(label) : next.add(label); return next; });
+  const visibleInstances = useMemo(() => (instances || []).filter((i) => !hidden.has(i.label)), [instances, hidden]);
+
+  const merged = useMemo(() => {
+    if (!instances) return null;
+    const dteMap = new Map();
+    instances.forEach((inst) => inst.series.forEach((r) => {
+      if (!dteMap.has(r.dte)) dteMap.set(r.dte, {});
+      dteMap.get(r.dte)[inst.label] = r.value;
+      dteMap.get(r.dte)[`${inst.label}__stale`] = r.stale;
+    }));
+    const dtes = [...dteMap.keys()].sort((a, b) => a - b);
+    return dtes.map((dte) => {
+      const row = { dte, ...dteMap.get(dte) };
+      const vals = visibleInstances.map((i) => dteMap.get(dte)[i.label]).filter((v) => v !== undefined);
+      row.average = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+      return row;
+    });
+  }, [instances, visibleInstances]);
+
+  const palette = C.instancePalette;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <StructureBuilderPanel config={cfg} onChange={setCfg} accent={C.amber} title="Structure to track" showStartMonth={false} anchorPreview={`${cfg.a.product}${MONTH_NAMES[anchorMonth - 1]}${String(anchorYear).slice(-2)}`} />
+
+      <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 6, padding: 14 }}>
+        <Field label="Field" width={130}><Select value={effectiveField} onChange={setField} options={FIELD_OPTIONS.map((o) => ({ ...o, disabled: o.value === "volume" && volumeDisabled }))} /></Field>
+        <Field label="Anchor contract month" width={100}><Select value={anchorMonth} onChange={(v) => setAnchorMonth(Number(v))} options={MONTH_NAMES.map((m, i) => ({ value: i + 1, label: m }))} /></Field>
+        <Field label="Anchor year" width={90}><NumberInput value={anchorYear} onChange={setAnchorYear} min={2015} /></Field>
+        <Field label="Lookback (# prior instances)" width={80}><NumberInput value={lookback} min={1} onChange={setLookback} /></Field>
+        <Field label="Window before expiry (days)" width={80}><NumberInput value={windowDays} min={5} onChange={setWindowDays} /></Field>
+        <button onClick={run} disabled={loading} style={primaryBtnS(C)}>{loading ? "Fetching\u2026" : "Build alignment"}</button>
+      </div>
+
+      <div style={{ fontSize: 11, color: C.textFaint, fontFamily: "var(--mono)" }}>
+        Expiry rule \u2014 CO: last business day, 2 months prior to contract month. CL: 3 business days before the 25th of the month prior (4 if the 25th falls on a weekend). Weekends only; no exchange holiday calendar applied.
+        {volumeDisabled && field === "volume" && " Volume disabled and reverted to Close for this structure (derived, not a real listed volume)."}
+      </div>
+
+      {error && <div style={errorBoxS(C)}>{error}</div>}
+      {!error && fetchWarning && <div style={{ ...errorBoxS(C), borderColor: C.border, color: C.textDim }}>{fetchWarning}</div>}
+
+      {instances && merged && (<>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {instances.map((inst, i) => {
+            const isHidden = hidden.has(inst.label);
+            return (
+              <button key={inst.label} onClick={() => toggleHidden(inst.label)} title="Click to show/hide this instance" style={{ fontSize: 11, fontFamily: "var(--mono)", color: isHidden ? C.textFaint : palette[i % palette.length], background: isHidden ? "transparent" : (C.mode === "dark" ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.03)"), border: `1px solid ${isHidden ? C.border : palette[i % palette.length]}`, borderRadius: 4, padding: "4px 9px", cursor: "pointer", textDecoration: isHidden ? "line-through" : "none", opacity: isHidden ? 0.55 : 1, display: "flex", alignItems: "center", gap: 6 }}>
+                <input type="checkbox" checked={!isHidden} readOnly style={{ pointerEvents: "none" }} />{inst.label} \u00b7 expires {inst.expiry}
+              </button>
+            );
+          })}
+          {rollMarks && rollMarks.length > 0 && (
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: C.textDim, cursor: "pointer", marginLeft: 4 }}>
+              <input type="checkbox" checked={showRollLines} onChange={(e) => setShowRollLines(e.target.checked)} />Show roll lines
+            </label>
+          )}
+        </div>
+
+        <ChartPanel title="Structure value vs. days to expiry (each line = one historical instance; click a chip above to show/hide)">
+          <ZoomBar onReset={zoomChart.reset} />
+          <ResponsiveContainer width="100%" height={360}>
+            <LineChart data={merged} margin={{ top: 6, right: 12, left: 0, bottom: 0 }} onMouseDown={zoomChart.onMouseDown} onMouseMove={zoomChart.onMouseMove} onMouseUp={zoomChart.onMouseUp}>
+              <CartesianGrid stroke={C.border} strokeDasharray="2 4" />
+              <XAxis dataKey="dte" domain={zoomChart.domain} allowDataOverflow type="number" tick={{ fill: C.textFaint, fontSize: 10 }} stroke={C.border} label={{ value: "Trading days to expiry", position: "insideBottom", offset: -2, fill: C.textFaint, fontSize: 11 }} />
+              <YAxis tick={{ fill: C.textFaint, fontSize: 10 }} stroke={C.border} />
+              <Tooltip contentStyle={tooltipStyleS(C)} />
+              <Legend wrapperStyle={{ fontSize: 10, color: C.textDim }} />
+              {visibleInstances.map((inst) => { const idx = instances.indexOf(inst); return <Line key={inst.label} type="monotone" dataKey={inst.label} stroke={palette[idx % palette.length]} dot={staleDot(inst.label, C.amber)} strokeWidth={1} connectNulls isAnimationActive={false} />; })}
+              <Line type="monotone" dataKey="average" stroke={C.text} dot={false} strokeWidth={2.4} name="Average (visible)" connectNulls isAnimationActive={false} />
+              {showRollLines && rollMarks && rollMarks.map((rm) => (
+                <ReferenceLine key={rm.j} x={rm.dte} stroke={C.amber} strokeOpacity={0.5} strokeDasharray="3 3" label={{ value: rm.label, position: "top", fill: C.textFaint, fontSize: 9 }} />
+              ))}
+              {zoomChart.ref.left !== "" && zoomChart.ref.right !== "" ? <ReferenceArea x1={zoomChart.ref.left} x2={zoomChart.ref.right} strokeOpacity={0.3} fill={C.amber} fillOpacity={0.12} /> : null}
+              <Brush key={zoomChart.brushKey} dataKey="dte" height={20} stroke={C.amber} fill={C.panelAlt} travellerWidth={8} />
+            </LineChart>
+          </ResponsiveContainer>
+          <div style={{ fontSize: 10, color: C.textFaint, marginTop: 4 }}>Hollow amber dots mark forward-filled points (Double Fly / Custom structures only — Outright/Spread/Butterfly are real single-instrument prints with no client-side combining). Dashed amber lines mark roll points — where a nearer month expires and the tracked contract's generic rank steps down (e.g. "5th\u21924th") — averaged across the visible historical instances and using the same expiry rule as above.</div>
+        </ChartPanel>
+      </>)}
+    </div>
+  );
+}
+
+/* ============================================================
+   SHARED CHROME
+   ============================================================ */
+
+function StatCard({ label, value, n, raw, help }) {
+  const C = useColors();
+  const display = value === null || value === undefined || Number.isNaN(value) ? "\u2014" : value.toFixed(3);
+  const color = !raw && value !== null ? (value >= 0 ? C.seriesA : C.seriesB) : C.amber;
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 6, padding: "12px 16px", minWidth: 160, maxWidth: 220 }} title={help}>
+      <div style={{ fontSize: 11, color: C.textDim }}>{label}</div>
+      <div style={{ fontSize: 22, fontFamily: "var(--mono)", color, marginTop: 2 }}>{display}</div>
+      {n !== undefined && <div style={{ fontSize: 10, color: C.textFaint, marginTop: 2 }}>n = {n}</div>}
+      {help && <div style={{ fontSize: 9.5, color: C.textFaint, marginTop: 4, lineHeight: 1.4 }}>{help}</div>}
+    </div>
+  );
+}
+function ChartPanel({ title, children, style }) {
+  const C = useColors();
+  return (<div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 6, padding: 14, ...style }}><div style={{ fontSize: 12, color: C.textDim, marginBottom: 8, fontFamily: "var(--sans)" }}>{title}</div>{children}</div>);
+}
+
+/* ============================================================
+   APP ROOT
+   ============================================================ */
+
+function App() {
+  const [tab, setTab] = useState("corr");
+  const [token, setToken] = useState("");
+  const [showToken, setShowToken] = useState(false);
+  const [mode, setMode] = useState("dark");
+  const C = PALETTES[mode];
+
+  return (
+    <ThemeCtx.Provider value={C}>
+      <TokenCtx.Provider value={token}>
+        <div style={{ "--mono": "ui-monospace, 'IBM Plex Mono', 'SFMono-Regular', Menlo, Consolas, monospace", "--sans": "'IBM Plex Sans', -apple-system, 'Segoe UI', sans-serif", background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "var(--sans)", padding: 20, boxSizing: "border-box" }}>
+          <style>{`
+            @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+            input[type="date"]::-webkit-calendar-picker-indicator { filter: ${mode === "dark" ? "invert(0.6)" : "none"}; }
+            ::-webkit-scrollbar { height: 6px; width: 6px; } ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 3px; }
+          `}</style>
+
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 18 }}>
+            <div>
+              <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: 0.2 }}>Structure Correlation Desk</div>
+              <div style={{ fontSize: 12, color: C.textFaint, marginTop: 2 }}>Running-code OHLC \u00b7 intermarket spreads \u00b7 pre-expiry alignment</div>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <div style={{ display: "flex", gap: 2, background: C.panelAlt, border: `1px solid ${C.border}`, borderRadius: 4, padding: 2 }}>
+                {["dark", "light"].map((m) => (<button key={m} onClick={() => setMode(m)} style={{ background: mode === m ? C.panel : "transparent", color: mode === m ? C.text : C.textFaint, border: "none", borderRadius: 3, padding: "5px 10px", fontSize: 11, cursor: "pointer", fontFamily: "var(--mono)" }}>{m === "dark" ? "\u25cf Dark" : "\u25cb Light"}</button>))}
+              </div>
+              <input type={showToken ? "text" : "password"} placeholder="Bearer <access_token>" value={token} onChange={(e) => setToken(e.target.value)} style={{ ...inputBaseS(C), width: 300 }} />
+              <button onClick={() => setShowToken((s) => !s)} style={ghostBtnSmallS(C)}>{showToken ? "hide" : "show"}</button>
+              <span style={{ fontSize: 10, color: token ? C.seriesA : C.textFaint }}>{token ? "\u25cf session-only" : "\u25cb not set"}</span>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 4, marginBottom: 18, borderBottom: `1px solid ${C.border}` }}>
+            {[{ id: "corr", label: "Correlation Explorer" }, { id: "expiry", label: "Pre-Expiry Explorer" }].map((t) => (
+              <button key={t.id} onClick={() => setTab(t.id)} style={{ background: "transparent", border: "none", cursor: "pointer", padding: "10px 16px", fontSize: 13, fontFamily: "var(--sans)", color: tab === t.id ? C.text : C.textFaint, borderBottom: tab === t.id ? `2px solid ${C.amber}` : "2px solid transparent", marginBottom: -1 }}>{t.label}</button>
+            ))}
+          </div>
+
+          {tab === "corr" ? <CorrelationExplorer /> : <PreExpiryExplorer />}
+
+          <div style={{ marginTop: 24, fontSize: 10, color: C.textFaint, lineHeight: 1.6 }}>
+            Data source: {V2_BASE} Outright/Spread/Butterfly are fetched as single real running codes (e.g. <span style={{ fontFamily: "var(--mono)" }}>COX26-Z26-F27</span>) \u2014 the API returns the actual traded structure. Double Fly is built as Fly(N) \u2212 Fly(N+1); Custom combines individual outrights client-side; both use forward-fill across legs with a visual marker on filled points. Token is kept in this session's memory only.
+          </div>
+        </div>
+      </TokenCtx.Provider>
+    </ThemeCtx.Provider>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+
+</script>
+</body>
+</html>
