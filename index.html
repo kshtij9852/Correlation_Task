@@ -993,7 +993,7 @@ function App() {
               <button key={t.id} onClick={() => setTab(t.id)} style={{ background: "transparent", border: "none", cursor: "pointer", padding: "10px 16px", fontSize: 13, fontFamily: "var(--sans)", color: tab === t.id ? C.text : C.textFaint, borderBottom: tab === t.id ? `2px solid ${C.amber}` : "2px solid transparent", marginBottom: -1 }}>{t.label}</button>
             ))}
           </div>
-
+          
           {tab === "corr" ? <CorrelationExplorer /> : <PreExpiryExplorer />}
 
           <div style={{ marginTop: 24, fontSize: 10, color: C.textFaint, lineHeight: 1.6 }}>
